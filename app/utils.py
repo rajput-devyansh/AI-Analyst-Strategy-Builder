@@ -1,14 +1,11 @@
 import polars as pl
-import io
+import json
 
 def load_data(uploaded_file):
-    """
-    Loads raw data into Polars (High Performance).
-    """
     try:
         if uploaded_file.name.endswith('.csv'):
-            # try_parse_dates=True attempts to fix date formats automatically
-            return pl.read_csv(uploaded_file, ignore_errors=True, try_parse_dates=True)
+            # ignore_errors=True is REQUIRED for your Supply Chain "Bad Row" test case
+            return pl.read_csv(uploaded_file, ignore_errors=True, try_parse_dates=True, infer_schema_length=10000)
         else:
             return pl.read_excel(uploaded_file)
     except Exception as e:
@@ -16,27 +13,17 @@ def load_data(uploaded_file):
 
 def get_data_profile(df: pl.DataFrame):
     """
-    Generates a concise metadata summary for the AI.
+    Stats for the AI to understand column ranges.
     """
-    # 1. Capture Schema & Types
-    schema_info = {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)}
-    
-    # 2. Count Nulls
-    null_counts = {col: df[col].null_count() for col in df.columns if df[col].null_count() > 0}
-    
-    # 3. Get Sample Rows (convert to markdown for readability)
-    sample_rows = df.head(3).to_pandas().to_markdown(index=False)
-    
-    profile = f"""
-    DATASET SHAPE: {df.height} rows, {df.width} columns.
-    
-    COLUMNS & TYPES:
-    {schema_info}
-    
-    MISSING VALUES (Nulls):
-    {null_counts}
-    
-    SAMPLE DATA:
-    {sample_rows}
-    """
-    return profile
+    profile_data = {}
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        stats = {"type": dtype, "nulls": df[col].null_count()}
+        
+        # Get Min/Max to help AI detect "Age: -5" or "Year: 2099"
+        if dtype in ["Int64", "Float64", "Int32", "Float32"]:
+            stats["min"] = df[col].min()
+            stats["max"] = df[col].max()
+            
+        profile_data[col] = stats
+    return json.dumps(profile_data, indent=2, default=str)

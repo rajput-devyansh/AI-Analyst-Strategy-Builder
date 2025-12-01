@@ -1,32 +1,45 @@
 import re
+import polars as pl
 from app.llm_engine import get_llm
 
-def run_janitor(profile, instruction):
+def run_janitor(profile, issue_context, user_instruction):
     llm = get_llm(mode="coding")
+    max_retries = 3
+    last_error = ""
     
-    prompt = f"""
-    You are an Expert Python Data Engineer.
+    base_prompt = f"""
+    You are a Polars Python Expert.
+    PROFILE: {profile}
+    ISSUE: {issue_context}
+    COMMAND: {user_instruction}
     
-    DATA PROFILE:
-    {profile}
-    
-    USER REQUEST:
-    "{instruction}"
-    
-    TASK:
-    Write a Python function `clean_data(df)` using the POLARS library (`import polars as pl`) to perform the requested cleaning.
-    
-    RULES:
-    1. Input: `df` (pl.DataFrame). Output: `df` (pl.DataFrame).
-    2. USE ONLY POLARS SYNTAX. Do not use Pandas.
-    3. Handle data types carefully (e.g., convert strings to numbers if needed).
-    4. Return ONLY the code inside ```python ``` blocks.
+    TASK: Write a function `clean_data(df)` that takes/returns a Polars DataFrame.
+    RULES: 
+    1. Use 'import polars as pl'.
+    2. Handle types strictly (cast strings to numbers if needed).
+    3. Return ONLY python code inside ```python``` blocks.
+    4. If removing rows, use `df.filter(...)`.
+    5. If modifying columns, use `df.with_columns(...)`.
     """
-    
-    response = llm.invoke(prompt)
-    
-    # Extract code block using Regex
-    match = re.search(r"```python(.*?)```", response.content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return response.content
+
+    for attempt in range(max_retries):
+        prompt = base_prompt
+        if last_error:
+            prompt += f"\n\n⚠️ PREVIOUS CODE FAILED: {last_error}\nFIX IT."
+            
+        response = llm.invoke(prompt)
+        
+        # Extract Code
+        match = re.search(r"```python(.*?)```", response.content, re.DOTALL)
+        code = match.group(1).strip() if match else response.content
+        
+        # Test Compile
+        try:
+            local_env = {'pl': pl}
+            exec(code, globals(), local_env)
+            if 'clean_data' in local_env:
+                return code # Success!
+        except Exception as e:
+            last_error = str(e)
+            
+    return f"# Error: Could not generate valid code. {last_error}"

@@ -7,3 +7,5 @@ plotly
 openpyxl
 tabulate
 xlsxwriter
+faker
+numpy

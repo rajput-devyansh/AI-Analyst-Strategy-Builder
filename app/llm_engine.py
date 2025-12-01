@@ -1,24 +1,12 @@
 from langchain_ollama import ChatOllama
 
 def get_llm(mode="reasoning"):
-    """
-    Returns the optimal model for the specific task.
-    Constraints: Optimized for RTX 3060 (6GB VRAM).
-    """
     if mode == "coding":
-        # The 'Hands': Writes Polars code, handles syntax, regex, and cleaning.
-        return ChatOllama(
-            model="qwen2.5-coder:1.5b", 
-            temperature=0  # Zero temperature for precise, non-creative code
-        )
+        # Qwen 2.5 Coder: Best small coding model
+        return ChatOllama(model="qwen2.5-coder:1.5b", temperature=0)
     
     elif mode == "reasoning":
-        # The 'Brain': Analyzes strategy, business logic, and relationships.
-        return ChatOllama(
-            model="cogito:3b", 
-            temperature=0.2  # Low temperature for factual but articulate insights
-        )
+        # Cogito 3B: Excellent at detecting logic contradictions
+        return ChatOllama(model="cogito:3b", temperature=0.1)
         
-    else:
-        # Fallback
-        return ChatOllama(model="cogito:3b", temperature=0)
+    return ChatOllama(model="cogito:3b", temperature=0)
