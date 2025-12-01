@@ -1,0 +1,8 @@
+streamlit
+polars
+pandas
+langchain-ollama
+langgraph
+plotly
+openpyxl
+tabulate
