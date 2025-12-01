@@ -6,3 +6,4 @@ langgraph
 plotly
 openpyxl
 tabulate
+xlsxwriter
