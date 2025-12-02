@@ -1,232 +1,232 @@
 import streamlit as st
 import polars as pl
+
+# --- IMPORTS ---
 from app.utils import load_data, get_data_profile
 from app.scanner import scan_structural_issues
+from app.structural_fixer import apply_fix 
 from app.deep_scanner import get_batches, analyze_batch, aggregate_deep_issues
-from app.agents.janitor import run_janitor
-from app.schema_manager import get_schema_summary, apply_schema_changes, TYPE_MAPPING
+from app.agents.janitor import run_janitor 
+from app.schema_manager import get_column_info, get_preview_value, cast_single_column, get_current_schema_view, TYPE_MAPPING
+from app.state_manager import init_session_state, save_checkpoint, restore_checkpoint
 
-st.set_page_config(page_title="AI Data Auditor", layout="wide")
-st.title("🧠 AI Analyst: Dual-Engine Audit")
+# --- SETUP ---
+st.set_page_config(page_title="AI Data Auditor", layout="wide", page_icon="🧠")
+init_session_state()
 
-# --- STATE MANAGEMENT ---
-if "df" not in st.session_state: st.session_state["df"] = None
-if "schema_locked" not in st.session_state: st.session_state["schema_locked"] = False
-if "fast_issues" not in st.session_state: st.session_state["fast_issues"] = []
-if "deep_issues" not in st.session_state: st.session_state["deep_issues"] = []
-
-# --- SIDEBAR: INGESTION ---
+# ==============================================================================
+# 🕒 SIDEBAR: HISTORY & UNDO
+# ==============================================================================
 with st.sidebar:
-    st.header("1. Ingestion")
-    uploaded_file = st.file_uploader("Upload Chaos Data", type=["csv", "xlsx"])
-    if uploaded_file and st.button("Load Data"):
-        df = load_data(uploaded_file)
-        if isinstance(df, str):
-            st.error(df)
-        else:
-            # Reset state on new load
-            st.session_state["df"] = df
-            st.session_state["schema_locked"] = False
-            st.session_state["fast_issues"] = []
-            st.session_state["deep_issues"] = []
-            # Clear editor state if exists
-            if "schema_editor" in st.session_state:
-                del st.session_state["schema_editor"]
-            st.success(f"Loaded {df.height} rows.")
+    st.title("🕒 Change History")
+    
+    if not st.session_state["history"]:
+        st.info("No changes applied yet.")
+    else:
+        st.caption("Click 'Revert' to go back to a previous state.")
+        # Iterate backwards to show newest at top
+        for i in range(len(st.session_state["history"]) - 1, -1, -1):
+            snapshot = st.session_state["history"][i]
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"**{i+1}. {snapshot['desc']}**")
+            with col2:
+                if st.button("↩️", key=f"hist_{i}", help=f"Revert to before '{snapshot['desc']}'"):
+                    restore_checkpoint(i)
+                    st.rerun()
+        
+        st.divider()
+        if st.button("♻️ Reset All (Start Over)"):
+            st.session_state.clear()
             st.rerun()
 
-# --- MAIN EXECUTION ---
-if st.session_state["df"] is not None:
+# ==============================================================================
+# 1. STAGE: UPLOAD (Main Screen)
+# ==============================================================================
+if st.session_state["app_stage"] == "UPLOAD":
+    st.title("📂 Step 1: Upload Raw Data")
+    st.markdown("Upload your CSV or Excel file to begin the Audit Process.")
+    
+    uploaded_file = st.file_uploader("Drag and drop file here", type=["csv", "xlsx"])
+    
+    if uploaded_file:
+        if st.button("🚀 Analyze File", type="primary"):
+            df = load_data(uploaded_file)
+            if isinstance(df, str):
+                st.error(df)
+            else:
+                # Save Initial State
+                st.session_state["df"] = df
+                st.session_state["initial_schema_view"] = get_current_schema_view(df)
+                
+                # Move to Next Stage
+                save_checkpoint("Initial Upload") # Save clean state
+                st.session_state["app_stage"] = "SCHEMA"
+                st.rerun()
+
+# ==============================================================================
+# 2. STAGE: SCHEMA MANAGER
+# ==============================================================================
+elif st.session_state["app_stage"] == "SCHEMA":
+    st.title("🛠️ Step 2: Schema Validation")
+    st.info("Review data types before we scan for errors. Click 'Update' to apply changes.")
+    
     df = st.session_state["df"]
     
-    # ==================================================
-    # PHASE 0: SCHEMA VALIDATION (The "Quality Gate")
-    # ==================================================
-    if not st.session_state["schema_locked"]:
-        st.info("👇 Validate data types. The 'Updated Format' column previews your changes.")
-        
-        # 1. Get current edits if they exist (to generate live previews)
-        current_edits = None
-        if "schema_editor" in st.session_state:
-            current_edits = st.session_state["schema_editor"]
+    # A. Display Initial vs Current
+    col_a, col_b = st.columns(2)
+    with col_a:
+        with st.expander("📄 Initial Detected Schema"):
+            st.dataframe(st.session_state["initial_schema_view"], use_container_width=True, hide_index=True)
+    with col_b:
+        with st.expander("📄 Current Schema (Live)"):
+            st.dataframe(get_current_schema_view(df), use_container_width=True, hide_index=True)
+
+    st.divider()
+    
+    # B. Column Cards
+    grid_cols = st.columns(3) # create a grid layout for cards
+    
+    for i, col in enumerate(df.columns):
+        # Distribute cards across 3 columns
+        with grid_cols[i % 3]:
+            current_type, sample_val = get_column_info(df, col)
             
-        # 2. Generate the Summary Table with Previews
-        schema_df = get_schema_summary(df, current_edits)
-        
-        # 3. Show Editable Table
-        edited_schema = st.data_editor(
-            schema_df,
-            key="schema_editor", 
-            column_config={
-                "Column Name": st.column_config.Column(disabled=True),
-                "Detected Type": st.column_config.Column(disabled=True),
+            with st.container(border=True):
+                st.markdown(f"**{col}**")
+                st.caption(f"Type: `{current_type}`")
+                st.code(sample_val, language=None)
                 
-                # VISUAL: Raw Data
-                "Actual Raw Format": st.column_config.TextColumn(
-                    "Actual Raw Format", 
-                    disabled=True, 
-                    help="How the data looks right now (Sample)"
-                ),
+                # Dropdown
+                type_options = list(TYPE_MAPPING.keys())
+                default_idx = type_options.index(current_type) if current_type in type_options else 0
+                new_type = st.selectbox("Convert to:", type_options, index=default_idx, key=f"type_{i}", label_visibility="collapsed")
                 
-                # INTERACTIVE: Dropdown
-                "Target Type": st.column_config.SelectboxColumn(
-                    "Change Data Type",
-                    help="Select new type",
-                    width="medium",
-                    options=list(TYPE_MAPPING.keys()),
-                    required=True
-                ),
+                # Preview & Button
+                preview = get_preview_value(sample_val, new_type)
                 
-                # VISUAL: Preview
-                "Updated Format": st.column_config.TextColumn(
-                    "Updated Format (Preview)", 
-                    disabled=True,
-                    help="What the data will become after casting"
-                )
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        # 4. Save Button
-        if st.button("✅ Confirm Data Types & Proceed", type="primary"):
-            with st.spinner("Applying strict type casting..."):
-                new_df, errors = apply_schema_changes(df, edited_schema)
-                
-                if errors:
-                    st.error("Errors during casting:")
-                    for e in errors: st.write(e)
-                else:
-                    st.session_state["df"] = new_df
-                    st.session_state["schema_locked"] = True
-                    st.success("Schema Applied Successfully!")
-                    st.rerun()
-                    
-    # ==================================================
-    # PHASE 1 & 2: THE ANALYST (Only after locking schema)
-    # ==================================================
-    else:
-        # Show a small summary of the locked schema
-        with st.expander("✅ Data Types Verified (Click to Re-open)", expanded=False):
-            if st.button("Reset Schema"):
-                st.session_state["schema_locked"] = False
-                st.rerun()
-            st.dataframe(df.head(3).to_pandas())
-
-        # METRICS
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rows", df.height)
-        c2.metric("Structural Issues", len(st.session_state["fast_issues"]))
-        c3.metric("Logic Issues", len(st.session_state["deep_issues"]))
-
-        # --- TABS DEFINITION ---
-        tab1, tab2 = st.tabs(["⚡ Fast Scan (Structure)", "🧠 Deep Scan (Logic)"])
-
-        # === TAB 1: FAST SCAN ===
-        with tab1:
-            if st.button("Run Fast Scan"):
-                st.session_state["fast_issues"] = scan_structural_issues(df)
-                st.rerun()
-                
-            if not st.session_state["fast_issues"]:
-                st.info("No structural issues detected (or scan not run yet).")
-
-            for i, issue in enumerate(st.session_state["fast_issues"]):
-                with st.expander(f"🔴 {issue['type']} in {issue['column']} (Count: {issue['count']})"):
-                    
-                    # 1. Construct the Menu Options
-                    if 'strategies' in issue:
-                        rec_fix = f"⭐ Rec: {issue['strategies']['rec']}"
-                        alt_fixes = [f"Option: {alt}" for alt in issue['strategies']['alts']]
-                        menu_options = [rec_fix] + alt_fixes + ["✏️ Custom Input", "🚫 Ignore"]
+                if new_type != current_type:
+                    if preview == "null (Cast Failed)":
+                        st.error("⚠️ Cast will fail (Null)")
                     else:
-                        menu_options = ["Auto-Fix", "✏️ Custom Input", "🚫 Ignore"]
-
-                    # 2. Render Selectbox
-                    selected_option = st.selectbox(
-                        "Choose Strategy:", 
-                        menu_options, 
-                        key=f"fast_select_{i}"
-                    )
+                        st.success(f"➝ {preview}")
                     
-                    # 3. Logic for Inputs
-                    final_instruction = ""
-                    
-                    if "Custom" in selected_option:
-                        final_instruction = st.text_input("Describe your fix:", key=f"fast_custom_{i}")
-                    elif "Ignore" in selected_option:
-                        st.caption("Issue will be ignored.")
-                    elif "Auto-Fix" in selected_option:
-                        final_instruction = issue.get('suggestion', 'Fix this issue')
-                    else:
-                        # Strip the prefixes ("⭐ Rec: ", "Option: ")
-                        if ": " in selected_option:
-                            final_instruction = selected_option.split(": ", 1)[1]
+                    if st.button(f"Apply", key=f"apply_{i}"):
+                        save_checkpoint(f"Changed '{col}' to {new_type}") # <--- SAVE HISTORY
+                        new_df, err = cast_single_column(df, col, new_type)
+                        if err: st.error(err)
                         else:
-                            final_instruction = selected_option
+                            st.session_state["df"] = new_df
+                            st.rerun()
 
-                    # 4. Apply Button
-                    if "Ignore" not in selected_option:
-                        if st.button("Apply Fix", key=f"fast_btn_{i}"):
-                            if not final_instruction: 
-                                final_instruction = issue.get('suggestion', 'Fix this issue')
+    st.markdown("---")
+    col_c, col_d = st.columns([4, 1])
+    with col_d:
+        if st.button("✅ Confirm & Next Step", type="primary", use_container_width=True):
+            st.session_state["app_stage"] = "AUDIT"
+            st.session_state["schema_locked"] = True
+            st.rerun()
 
-                            with st.spinner(f"Janitor applying: {final_instruction}..."):
-                                profile = get_data_profile(df)
-                                code = run_janitor(profile, issue['type'], final_instruction)
-                                
+# ==============================================================================
+# 3. STAGE: AUDIT & CLEAN
+# ==============================================================================
+elif st.session_state["app_stage"] == "AUDIT":
+    st.title("🕵️ Step 3: AI Audit")
+    
+    # Header & Tools
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    c1.metric("Rows", st.session_state["df"].height)
+    c2.metric("Columns", st.session_state["df"].width)
+    if c4.button("🔙 Back to Schema"):
+        st.session_state["app_stage"] = "SCHEMA"
+        st.rerun()
+
+    df = st.session_state["df"]
+    
+    tab1, tab2 = st.tabs(["⚡ Structural Scan (Fast)", "🧠 Semantic Scan (Deep)"])
+
+    # --- TAB 1: FAST SCAN ---
+    with tab1:
+        if st.button("Run Fast Scan"):
+            st.session_state["fast_issues"] = scan_structural_issues(df)
+            st.rerun()
+            
+        for i, issue in enumerate(st.session_state["fast_issues"]):
+            with st.expander(f"🔴 {issue['type']} in {issue['column']} ({issue['count']} rows)"):
+                
+                # Menu Logic
+                base_options = issue.get('options', [])
+                custom_opt = None
+                if issue['type'] == "Missing Values": custom_opt = "Fill with Custom Value"
+                elif issue['type'] == "Negative Values": custom_opt = "Replace Negatives with Custom Value"
+                final_menu = ["Select Action..."] + base_options
+                if custom_opt: final_menu.append(custom_opt)
+
+                selected_fix = st.selectbox("Strategy:", final_menu, key=f"fix_sel_{i}")
+                
+                custom_input_val = None
+                if "Custom Value" in selected_fix:
+                    custom_input_val = st.text_input(f"Value:", key=f"cust_val_{i}")
+
+                b1, b2 = st.columns([1, 5])
+                with b1:
+                    if st.button("Ignore", key=f"ign_{i}"):
+                        st.session_state["fast_issues"].pop(i)
+                        st.rerun()
+                with b2:
+                    if selected_fix != "Select Action...":
+                        if st.button("Apply Fix", type="primary", key=f"appl_{i}"):
+                            save_checkpoint(f"Fixed {issue['type']} in {issue['column']}") # <--- SAVE HISTORY
+                            
+                            with st.spinner("Applying..."):
                                 try:
-                                    loc = {'pl': pl}
-                                    exec(code, globals(), loc)
-                                    st.session_state["df"] = loc['clean_data'](df)
-                                    st.success("Fixed!")
+                                    new_df = apply_fix(df, selected_fix, issue['column'], custom_val=custom_input_val)
+                                    st.session_state["df"] = new_df
+                                    st.session_state["fast_issues"] = scan_structural_issues(new_df)
+                                    st.success("Done!")
                                     st.rerun()
                                 except Exception as e:
-                                    st.error(f"Failed: {e}")
+                                    st.error(f"Error: {e}")
 
-        # === TAB 2: DEEP SCAN ===
-        with tab2:
-            st.info("AI will read rows in batches to find logic contradictions.")
-            col_scan_1, col_scan_2 = st.columns([1, 3])
-            limit = col_scan_1.number_input("Rows to Scan", value=100, step=50)
-            
-            if col_scan_2.button("Start Deep Logic Scan"):
-                progress = st.progress(0)
-                status = st.empty()
-                raw_issues = []
-                
-                batches = list(get_batches(df.head(limit), 20))
-                for i, batch in enumerate(batches):
-                    progress.progress((i+1)/len(batches))
-                    status.text(f"Scanning Batch {i+1}/{len(batches)}...")
-                    raw_issues.extend(analyze_batch(batch))
+    # --- TAB 2: DEEP SCAN ---
+    with tab2:
+        col_scan_1, col_scan_2 = st.columns([1, 3])
+        limit = col_scan_1.number_input("Rows to Scan", 100, 5000, 100)
+        
+        if col_scan_2.button("Start AI Logic Scan"):
+            progress = st.progress(0)
+            status = st.empty()
+            raw_issues = []
+            batches = list(get_batches(df.head(limit), 20))
+            for i, batch in enumerate(batches):
+                progress.progress((i+1)/len(batches))
+                status.caption(f"Scanning Batch {i+1}/{len(batches)}...")
+                raw_issues.extend(analyze_batch(batch))
+            st.session_state["deep_issues"] = aggregate_deep_issues(raw_issues)
+            status.success("Complete!")
+            st.rerun()
+
+        if st.session_state["deep_issues"]:
+            if st.button("Clear Results"): st.session_state["deep_issues"] = []
+
+        for i, issue in enumerate(st.session_state["deep_issues"]):
+            with st.expander(f"⚠️ {issue['issue']} in {issue['column']} (Found {issue['count']} times)"):
+                st.write(f"Sample Rows: {issue['rows']}")
+                if st.button("Fix Logic", key=f"deep_fix_{i}"):
+                    save_checkpoint(f"AI Fix: {issue['issue']}") # <--- SAVE HISTORY
                     
-                st.session_state["deep_issues"] = aggregate_deep_issues(raw_issues)
-                status.success("Scan Complete!")
-                st.rerun()
-                
-            if not st.session_state["deep_issues"] and st.button("Clear Deep Scan Results"):
-                 st.session_state["deep_issues"] = []
+                    with st.spinner("Janitor Working..."):
+                        profile = get_data_profile(df)
+                        code = run_janitor(profile, issue['issue'], f"Fix: {issue['issue']}")
+                        try:
+                            loc = {'pl': pl}
+                            exec(code, globals(), loc)
+                            st.session_state["df"] = loc['clean_data'](df)
+                            st.success("Fixed!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
 
-            for i, issue in enumerate(st.session_state["deep_issues"]):
-                with st.expander(f"⚠️ {issue['issue']} in {issue['column']} (Found {issue['count']} times)"):
-                    st.write(f"Sample Row Indices: {issue['rows']}")
-                    
-                    if st.button("Fix This Logic", key=f"deep_{issue['column']}_{i}"):
-                        with st.spinner("Janitor fixing logic..."):
-                            profile = get_data_profile(df)
-                            code = run_janitor(profile, issue['issue'], f"Fix this logical error: {issue['issue']}")
-                            
-                            try:
-                                loc = {'pl': pl}
-                                exec(code, globals(), loc)
-                                st.session_state["df"] = loc['clean_data'](df)
-                                st.success("Logic Fixed!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed: {e}")
-
-        # FOOTER PREVIEW
-        st.write("---")
-        st.subheader("📊 Live Data Preview")
-        st.dataframe(df.head(50).to_pandas(), use_container_width=True)
+    st.markdown("---")
+    st.subheader("📊 Live Data Preview")
+    st.dataframe(df.head(50).to_pandas(), use_container_width=True)
