@@ -2,33 +2,25 @@ import polars as pl
 
 def apply_fix(df: pl.DataFrame, fix_type: str, column: str = None, custom_val=None) -> pl.DataFrame:
     """
-    Executes the fix. Now supports 'custom_val' for direct replacement.
+    Executes the fix. Handles Custom Values, Modes, and Drops safely.
     """
     
     # --- HANDLING CUSTOM VALUE INPUT ---
     if fix_type == "Fill with Custom Value":
-        # Handle Numeric vs String input
-        # If the column is numeric, try to cast the input
         if column and df[column].dtype in [pl.Int64, pl.Float64, pl.Int32, pl.Float32]:
             try:
                 custom_val = float(custom_val)
-                # If it's an integer like 5.0, make it 5
-                if custom_val.is_integer(): 
-                    custom_val = int(custom_val)
+                if custom_val.is_integer(): custom_val = int(custom_val)
             except:
-                pass # Keep as string if cast fails (Polars might throw error later, which is fine)
-
-        # Logic: If fixing Missing Values
+                pass 
         return df.with_columns(pl.col(column).fill_null(custom_val))
     
     if fix_type == "Replace Negatives with Custom Value":
-         # Same casting logic
         if df[column].dtype in [pl.Int64, pl.Float64, pl.Int32, pl.Float32]:
             try:
                 custom_val = float(custom_val)
             except:
                 pass
-        
         return df.with_columns(
             pl.when(pl.col(column) < 0).then(custom_val).otherwise(pl.col(column)).alias(column)
         )
@@ -41,9 +33,15 @@ def apply_fix(df: pl.DataFrame, fix_type: str, column: str = None, custom_val=No
         return df.with_columns(pl.col(column).fill_null(pl.col(column).mean()))
 
     elif fix_type == "Fill with Mode":
-        # Mode returns a list, take first
-        mode_val = df[column].mode().get(0)
-        return df.with_columns(pl.col(column).fill_null(mode_val))
+        try:
+            mode_series = df[column].drop_nulls().mode()
+            if mode_series.len() > 0:
+                mode_val = mode_series.item(0)
+                if mode_val is not None:
+                    return df.with_columns(pl.col(column).fill_null(mode_val))
+            return df 
+        except Exception:
+            return df
 
     elif fix_type == "Fill with 0":
         return df.with_columns(pl.col(column).fill_null(0))
@@ -59,8 +57,11 @@ def apply_fix(df: pl.DataFrame, fix_type: str, column: str = None, custom_val=No
 
     elif fix_type == "Forward Fill" or "Forward Fill" in fix_type:
         return df.with_columns(pl.col(column).fill_null(strategy="forward"))
+    
+    elif fix_type == "Backward Fill" or "Backward Fill" in fix_type:
+        return df.with_columns(pl.col(column).fill_null(strategy="backward"))
 
-    elif fix_type == "Drop Rows" or "Drop Rows" in fix_type:
+    elif fix_type == "Drop Rows (Nulls)":
         return df.drop_nulls(subset=[column])
 
     # --- 2. NEGATIVE VALUE FIXES ---
@@ -78,8 +79,11 @@ def apply_fix(df: pl.DataFrame, fix_type: str, column: str = None, custom_val=No
             pl.when(pl.col(column) < 0).then(mean_val).otherwise(pl.col(column)).alias(column)
         )
 
-    elif "Drop Rows" in fix_type and "Negatives" in fix_type: # Specific catch
-        return df.filter(pl.col(column) >= 0)
+    # --- CRITICAL FIX: PRESERVE NULLS WHEN DROPPING NEGATIVES ---
+    elif fix_type == "Drop Rows (Negatives)":
+        # Keep values that are >= 0 OR are Null
+        # (Because "Missing Values" is a separate issue type we handle elsewhere)
+        return df.filter((pl.col(column) >= 0) | pl.col(column).is_null())
 
     # --- 3. DUPLICATE FIXES ---
     elif fix_type == "Remove Duplicates":
