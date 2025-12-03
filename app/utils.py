@@ -27,3 +27,24 @@ def get_data_profile(df: pl.DataFrame):
             
         profile_data[col] = stats
     return json.dumps(profile_data, indent=2, default=str)
+
+# ... (existing imports and code) ...
+
+def validate_input(val, dtype_str):
+    """
+    Validates if the input value matches the column's data type.
+    """
+    if not val: return True, val 
+    
+    # 1. Numeric Check
+    is_numeric_col = "Int" in dtype_str or "Float" in dtype_str
+    if is_numeric_col:
+        try:
+            float(val)
+            return True, val
+        except ValueError:
+            return False, None
+            
+    # 2. Date Check could be added here if needed
+    
+    return True, val
