@@ -12,6 +12,19 @@ def render_deep_scan_tab(df):
     """
     st.info("🧠 **AI Semantic Scan**: Detects complex paradoxes (e.g., 'Age 5 Married', 'Arrived before Shipped'). This requires AI processing.")
     
+    # --- COLUMN SELECTION ---
+    all_cols = df.columns
+    selected_cols = st.multiselect(
+        "Select Columns to Scan (Scanning fewer columns is faster):",
+        options=all_cols,
+        default=all_cols,
+        help="The AI will only look for logic errors within these specific columns."
+    )
+    
+    if not selected_cols:
+        st.warning("Please select at least one column to scan.")
+        return
+
     # --- SAMPLING CONTROLS ---
     col_mode, col_input = st.columns([1, 2])
     
@@ -21,10 +34,24 @@ def render_deep_scan_tab(df):
     with col_input:
         limit = 100
         if mode == "Row Count":
-            limit = st.number_input("Max Rows to Scan:", min_value=20, max_value=df.height, value=min(100, df.height))
+            # Default to 20 or max rows if smaller
+            default_rows = min(20, df.height)
+            limit = st.number_input("Max Rows to Scan:", min_value=1, max_value=df.height, value=default_rows)
         else:
-            pct = st.slider("Percentage of Data:", 1, 100, 10)
-            limit = int(df.height * (pct / 100))
+            # Percentage Logic
+            # Recommendation: 100% is best. Default 60% if data is large, else 100%
+            default_pct = 60 if df.height > 100 else 100
+            
+            pct = st.slider("Percentage of Data:", 1, 100, default_pct, help="100% is recommended for best results.")
+            
+            # Logic: Ensure min rows is at least 20 if possible
+            calculated_rows = int(df.height * (pct / 100))
+            if calculated_rows < 20 and df.height >= 20:
+                st.caption("⚠️ Percentage yields fewer than 20 rows. Adjusting to min 20 rows.")
+                limit = 20
+            else:
+                limit = max(calculated_rows, 1) # Ensure at least 1 row
+            
             st.caption(f"Scanning {limit} rows.")
 
     # --- RUNNER WITH LIVE TIMER ---
@@ -34,8 +61,12 @@ def render_deep_scan_tab(df):
         
         raw_issues = []
         batch_size = 20
-        # Create batches
-        batches = list(get_batches(df.head(limit), batch_size))
+        
+        # Filter DF to only selected columns for the scan (Reduces token usage)
+        scan_df = df.select(selected_cols)
+        
+        # Create batches from the subset
+        batches = list(get_batches(scan_df.head(limit), batch_size))
         total_batches = len(batches)
         
         start_time = time.time()
@@ -105,6 +136,7 @@ def render_deep_scan_tab(df):
                             exec(code, globals(), loc)
                             new_df = loc['clean_data'](df)
                             
+                            # CALCULATE CHANGESET (Rows Dropped vs Values Updated)
                             diff = df.height - new_df.height
                             changeset = f"Dropped {diff} rows" if diff > 0 else "Logic Updated"
                             

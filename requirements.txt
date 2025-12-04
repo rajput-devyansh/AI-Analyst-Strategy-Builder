@@ -7,6 +7,5 @@ plotly
 openpyxl
 tabulate
 xlsxwriter
-faker
 numpy
 rapidfuzz
