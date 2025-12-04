@@ -3,6 +3,7 @@ import json
 import re
 from rapidfuzz import process, fuzz
 from app.llm_engine import get_llm
+from typing import List, Dict, Generator
 
 # ==============================================================================
 # ENGINE 1: VOCABULARY & PATTERN SCANNER (Code-Based / Fast)
@@ -23,7 +24,6 @@ def scan_vocabulary_issues(df: pl.DataFrame):
         
         # --- A. EMAIL FORMAT CHECK (Regex) ---
         if "email" in col.lower():
-            # Check for non-null strings that DO NOT contain '@'
             bad_emails = df.filter(
                 (pl.col(col).is_not_null()) & 
                 (~pl.col(col).str.contains("@"))
@@ -38,7 +38,6 @@ def scan_vocabulary_issues(df: pl.DataFrame):
                 })
 
         # --- B. ENCODING CHECK (Garbage Chars) ---
-        # Heuristic: looking for common UTF-8 decoding mishaps like 'Ã©'
         try:
             garbage_rows = df.filter(pl.col(col).str.contains(r"[ÃÂ€â]"))
             if garbage_rows.height > 0:
@@ -50,27 +49,23 @@ def scan_vocabulary_issues(df: pl.DataFrame):
                     "suggestion": "Fix Encoding or Replace Characters"
                 })
         except:
-            pass # Regex might fail on some binary strings
+            pass 
 
         # --- PREPARE FOR VOCABULARY CHECKS ---
-        # Get counts of unique values (excluding nulls)
         n_unique = df[col].n_unique()
         
-        # Only run fuzzy logic on low-to-medium cardinality columns (Categories, Cities)
-        # Skipping IDs/UUIDs (> 500 uniques) to save time
+        # Only run fuzzy logic on low-to-medium cardinality columns
         if 2 < n_unique < 500:
             val_counts = df[col].drop_nulls().value_counts()
             values = val_counts[col].to_list()
             
             # --- C. CASE INCONSISTENCY ---
-            # Map lowercase -> list of original values
             lower_map = {}
             for v in values:
                 l = str(v).lower()
                 if l not in lower_map: lower_map[l] = []
                 lower_map[l].append(v)
             
-            # Find buckets where the same word appears in multiple cases (e.g. ['ny', 'NY'])
             inconsistent = [vals for vals in lower_map.values() if len(vals) > 1]
             if inconsistent:
                 issues.append({
@@ -82,7 +77,6 @@ def scan_vocabulary_issues(df: pl.DataFrame):
                 })
 
             # --- D. TYPO DETECTION (Fuzzy Logic) ---
-            # Strategy: Compare RARE items (< 1% freq) to COMMON items (> 1% freq)
             total_rows = df.height
             rare_cutoff = max(1, total_rows * 0.01) # 1% threshold
             
@@ -94,11 +88,9 @@ def scan_vocabulary_issues(df: pl.DataFrame):
                 if not isinstance(r, str) or not r.strip(): continue
                 if not common: continue
                 
-                # Use RapidFuzz to find the closest match in the 'common' list
                 match = process.extractOne(r, common, scorer=fuzz.ratio)
                 if match:
                     best_match, score, _ = match
-                    # Threshold: 85% similarity (High confidence typo)
                     if 85 <= score < 100:
                         typos.append(f"'{r}' -> '{best_match}'")
             
@@ -127,10 +119,8 @@ def scan_statistical_issues(df: pl.DataFrame):
     # --- A. NUMERIC OUTLIERS (IQR) ---
     num_cols = df.select(pl.col([pl.Int64, pl.Float64, pl.Int32, pl.Float32])).columns
     for col in num_cols:
-        # Skip binary columns (0/1) or very low cardinality numbers
         if df[col].n_unique() < 5: continue 
         
-        # Calculate IQR
         q1 = df[col].quantile(0.25)
         q3 = df[col].quantile(0.75)
         
@@ -139,7 +129,6 @@ def scan_statistical_issues(df: pl.DataFrame):
             lower_bound = q1 - (1.5 * iqr)
             upper_bound = q3 + (1.5 * iqr)
             
-            # Find rows outside bounds
             outliers = df.filter((pl.col(col) < lower_bound) | (pl.col(col) > upper_bound))
             if outliers.height > 0:
                 issues.append({
@@ -153,7 +142,6 @@ def scan_statistical_issues(df: pl.DataFrame):
     # --- B. DATE RANGES ---
     date_cols = df.select(pl.col([pl.Date, pl.Datetime])).columns
     for col in date_cols:
-        # Check for Years < 1900 or > 2030
         weird_dates = df.filter(
             (pl.col(col).dt.year() < 1900) | (pl.col(col).dt.year() > 2030)
         )
@@ -171,56 +159,97 @@ def scan_statistical_issues(df: pl.DataFrame):
 # ==============================================================================
 # ENGINE 3: LOGIC SCANNER (AI Batching / Slow)
 # ==============================================================================
-def get_batches(df: pl.DataFrame, batch_size=20):
-    """Yields small chunks of data with row indices."""
-    for i in range(0, df.height, batch_size):
-        slice_df = df.slice(i, batch_size)
-        yield slice_df.with_row_index(name="Row_Index", offset=i).to_dicts()
+def get_batches(df: pl.DataFrame, batch_size=20) -> Generator[pl.DataFrame, None, None]:
+    """Yields small SLICES of the dataframe (preserving types) instead of dicts."""
+    current_idx = 0
+    height = df.height
+    while current_idx < height:
+        # yield a DataFrame slice
+        yield df.slice(current_idx, batch_size)
+        current_idx += batch_size
 
-def analyze_batch(batch_data):
-    """Sends one batch to Cogito 3B."""
-    llm = get_llm(mode="reasoning")
-    data_str = json.dumps(batch_data, default=str)
-    
-    prompt = f"""
-    You are a Data Logic Auditor. Review these {len(batch_data)} rows.
-    DATA: {data_str}
-    
-    TASK: Find LOGICAL contradictions or BUSINESS rule violations.
-    
-    LOOK FOR THESE SPECIFIC TRAPS:
-    - Dates: Arrival before Ship? Exit before Join? Future dates (2099)?
-    - Demographics: Age 5 Married? Age 150?
-    - Finance: Credit Score > 800 Rejected? Income 0?
-    - Math: Total != Price * Qty?
-    - Geography: City/Country mismatch?
-    
-    OUTPUT: Return a strictly valid JSON LIST of objects. If no errors, return [].
-    Format: [{{"Row": 12, "Col": "Age", "Issue": "Child Marriage detected", "Fix": "Filter Age < 18"}}]
+def analyze_batch(batch_df: pl.DataFrame) -> List[Dict]:
     """
+    Sends one batch to Phi-4-Mini (The Reasoner).
+    Optimized to use Pipe-Separated Values for token efficiency.
+    """
+    llm = get_llm(mode="reasoning")
+    
+    # Convert DF to Pipe-Separated String (Markdown Table style)
+    # This is much easier for Phi-4 to read than JSON objects
+    data_str = batch_df.write_csv(separator="|")
+    
+    system_prompt = """
+    You are a Data Logic Auditor.
+    Analyze the following data sample for LOGICAL CONTRADICTIONS.
+    
+    COMMON TRAPS TO FIND:
+    - Time Travel: 'End Date' before 'Start Date'.
+    - Impossible Demographics: 'Age' < 18 but 'Status' = Married.
+    - Financial Errors: 'Price' is negative, or 'Total' != Price * Qty.
+    - Context Mismatch: 'City' = Paris but 'Country' = USA.
+    
+    OUTPUT FORMAT:
+    Return a strictly valid JSON LIST of objects. 
+    Format: [{"row_index": <int>, "column": "<col_name>", "issue": "<short description>"}]
+    If no errors, return [].
+    """
+    
+    user_prompt = f"""
+    DATA BATCH (Pipe Separated):
+    {data_str}
+    
+    Identify logic errors. Return JSON ONLY.
+    """
+    
     try:
-        response = llm.invoke(prompt)
+        # Construct messages properly
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        response = llm.invoke(messages)
         content = response.content.strip()
-        # Clean Markdown wrapper if present
-        if "```json" in content: content = content.split("```json")[1].split("```")[0]
-        elif "```" in content: content = content.split("```")[1].split("```")[0]
+        
+        # Clean Markdown wrappers
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.replace("```", "").strip()
+            
         return json.loads(content)
-    except:
+        
+    except json.JSONDecodeError:
+        # Common issue with small models, just skip batch
+        return []
+    except Exception as e:
+        print(f"Batch Error: {e}")
         return []
 
-def aggregate_deep_issues(raw_issues):
+def aggregate_deep_issues(raw_issues: List[Dict]) -> List[Dict]:
     """Groups individual errors into high-level insights."""
     grouped = {}
     for err in raw_issues:
-        key = f"{err.get('Col')}: {err.get('Issue')}"
+        # Normalize keys to match whatever the LLM returned (case insensitive check usually good practice)
+        col = err.get('column') or err.get('Col') or 'Unknown'
+        issue = err.get('issue') or err.get('Issue') or 'Logic Error'
+        row_idx = err.get('row_index') or err.get('Row') or '?'
+        
+        key = f"{col}: {issue}"
+        
         if key not in grouped:
             grouped[key] = {
-                "column": err.get('Col'), 
-                "issue": err.get('Issue'), 
+                "column": col, 
+                "issue": issue, 
                 "count": 0, 
                 "rows": [],
-                "type": "Logic Paradox" # UI Helper
+                "type": "Logic Paradox" 
             }
+        
         grouped[key]["count"] += 1
-        if len(grouped[key]["rows"]) < 5: grouped[key]["rows"].append(err.get('Row'))
+        # Only keep first 5 examples
+        if len(grouped[key]["rows"]) < 5: 
+            grouped[key]["rows"].append(row_idx)
+            
     return list(grouped.values())
