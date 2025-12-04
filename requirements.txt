@@ -9,3 +9,4 @@ tabulate
 xlsxwriter
 faker
 numpy
+rapidfuzz

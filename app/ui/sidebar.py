@@ -11,6 +11,11 @@ def render_history_item(i, event):
     with c1:
         st.markdown(f"**{event['summary']}**")
         if event['details']: st.caption(f"{event['details']}")
+        
+        # --- NEW: Show Impact (Rows Dropped/Changed) ---
+        if event.get('changeset'): 
+            st.caption(f"📉 {event['changeset']}")
+            
         st.caption(f"_{event['timestamp']}_")
     with c2:
         if st.button(btn_label, key=f"hist_{i}", help=help_text):
@@ -44,7 +49,7 @@ def render_sidebar():
                 scans = [x for x in audit_events if x[1].get('sub_category') == 'Scan']
                 system = [x for x in audit_events if x[1].get('sub_category') == 'System']
 
-                # Dynamic Expand Logic: Open if it matches the LAST action
+                # Dynamic Expand Logic
                 exp_struct = (last_cat == "Audit" and last_sub == "Structural")
                 exp_logic = (last_cat == "Audit" and last_sub == "Logic")
                 exp_scan = (last_cat == "Audit" and last_sub == "Scan")
@@ -70,7 +75,6 @@ def render_sidebar():
                 updates = [x for x in schema_events if x[1].get('sub_category') == 'Schema Updates']
                 system = [x for x in schema_events if x[1].get('sub_category') == 'System']
                 
-                # Expand Updates if that was the last thing we did
                 exp_updates = (last_cat == "Schema" and last_sub == "Schema Updates")
                 
                 if updates:
@@ -86,6 +90,19 @@ def render_sidebar():
             is_active = st.session_state["app_stage"] == "UPLOAD"
             with st.expander("Step 1: Data Ingestion", expanded=is_active):
                 for i, event in reversed(ingestion_events): render_history_item(i, event)
+
+        st.markdown("---")
+        
+        # DOWNLOAD BUTTON
+        if st.session_state["df"] is not None:
+            csv = st.session_state["df"].write_csv()
+            st.download_button(
+                "💾 Download Clean Data",
+                data=csv,
+                file_name="clean_data.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
         if history and st.button("♻️ Reset Project", use_container_width=True):
             st.session_state.clear()
