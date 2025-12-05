@@ -12,7 +12,7 @@ def render_history_item(i, event):
         st.markdown(f"**{event['summary']}**")
         if event['details']: st.caption(f"{event['details']}")
         
-        # --- NEW: Show Impact (Rows Dropped/Changed) ---
+        # --- Show Impact (Rows Dropped/Changed) ---
         if event.get('changeset'): 
             st.caption(f"📉 {event['changeset']}")
             
@@ -37,7 +37,9 @@ def render_sidebar():
         last_cat = last_event['category'] if last_event else None
         last_sub = last_event['sub_category'] if last_event else None
 
-        # --- STEP 3: AUDIT ---
+        # =========================================================
+        # STEP 3: AUDIT
+        # =========================================================
         audit_events = [(i, e) for i, e in enumerate(history) if e["category"] == "Audit"]
         if audit_events:
             # Main Step 3 expands if we are currently in Audit mode
@@ -67,24 +69,42 @@ def render_sidebar():
                     with st.expander(f"ℹ️ System Logs ({len(system)})", expanded=False):
                         for i, event in reversed(system): render_history_item(i, event)
 
-        # --- STEP 2: SCHEMA ---
+        # =========================================================
+        # STEP 2: SCHEMA (UPDATED)
+        # =========================================================
         schema_events = [(i, e) for i, e in enumerate(history) if e["category"] == "Schema"]
         if schema_events:
             is_active = st.session_state["app_stage"] == "SCHEMA"
             with st.expander("Step 2: Schema Validation", expanded=is_active):
+                
+                # Auto Mode Updates
                 updates = [x for x in schema_events if x[1].get('sub_category') == 'Schema Updates']
+                # Manual Mode Fixes (NEW)
+                fixes = [x for x in schema_events if x[1].get('sub_category') == 'Fix']
+                # System (Normalization, etc.)
                 system = [x for x in schema_events if x[1].get('sub_category') == 'System']
                 
+                # Expand Logic
                 exp_updates = (last_cat == "Schema" and last_sub == "Schema Updates")
+                exp_fixes = (last_cat == "Schema" and last_sub == "Fix")
+                exp_sys = (last_cat == "Schema" and last_sub == "System")
                 
                 if updates:
-                    with st.expander(f"✏️ Schema Updates ({len(updates)})", expanded=exp_updates):
+                    with st.expander(f"✏️ Type Changes ({len(updates)})", expanded=exp_updates):
                         for i, event in reversed(updates): render_history_item(i, event)
+                
+                # NEW SECTION FOR MANUAL FIXES
+                if fixes:
+                    with st.expander(f"🪄 Format Fixes ({len(fixes)})", expanded=exp_fixes):
+                        for i, event in reversed(fixes): render_history_item(i, event)
+
                 if system:
-                    with st.expander(f"ℹ️ System Logs ({len(system)})", expanded=False):
+                    with st.expander(f"ℹ️ System Logs ({len(system)})", expanded=exp_sys):
                         for i, event in reversed(system): render_history_item(i, event)
 
-        # --- STEP 1: INGESTION ---
+        # =========================================================
+        # STEP 1: INGESTION
+        # =========================================================
         ingestion_events = [(i, e) for i, e in enumerate(history) if e["category"] == "Ingestion"]
         if ingestion_events:
             is_active = st.session_state["app_stage"] == "UPLOAD"

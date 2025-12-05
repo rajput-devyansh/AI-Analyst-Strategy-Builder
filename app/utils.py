@@ -1,5 +1,20 @@
 import polars as pl
 import json
+import re
+
+def to_snake_case(text: str) -> str:
+    """
+    Converts 'Client Name' -> 'client_name'.
+    Handles special characters and spaces.
+    """
+    # 1. Lowercase
+    text = text.lower()
+    # 2. Replace non-alphanumeric with underscore
+    text = re.sub(r'[^a-z0-9]', '_', text)
+    # 3. Collapse multiple underscores
+    text = re.sub(r'_+', '_', text)
+    # 4. Strip leading/trailing underscores
+    return text.strip('_')
 
 def load_data(uploaded_file):
     try:
@@ -28,8 +43,6 @@ def get_data_profile(df: pl.DataFrame):
         profile_data[col] = stats
     return json.dumps(profile_data, indent=2, default=str)
 
-# ... (existing imports and code) ...
-
 def validate_input(val, dtype_str):
     """
     Validates if the input value matches the column's data type.
@@ -45,6 +58,4 @@ def validate_input(val, dtype_str):
         except ValueError:
             return False, None
             
-    # 2. Date Check could be added here if needed
-    
     return True, val
